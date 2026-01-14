@@ -2,6 +2,18 @@ This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-
 
 ## Getting Started
 
+### Environment variables
+
+Create a `.env.local` with:
+
+```bash
+NEXT_PUBLIC_SUPABASE_URL=...
+NEXT_PUBLIC_SUPABASE_ANON_KEY=...
+
+# Required for the Accounts module (server-only). Do NOT expose to the browser.
+SUPABASE_SERVICE_ROLE_KEY=...
+```
+
 First, run the development server:
 
 ```bash
