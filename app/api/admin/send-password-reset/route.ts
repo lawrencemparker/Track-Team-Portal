@@ -10,6 +10,15 @@ const BodySchema = z.object({
   email: z.string().trim().email(),
 });
 
+function getPublicSiteUrl(request: NextRequest) {
+  // Prefer explicit env var (best for Vercel + consistency)
+  const envUrl = process.env.NEXT_PUBLIC_SITE_URL?.trim();
+  if (envUrl) return envUrl.replace(/\/+$/, "");
+
+  // Fallback: derive from request (works if Vercel forwards correctly)
+  return request.nextUrl.origin;
+}
+
 export async function POST(request: NextRequest) {
   const gate = await requireCoachOrAssistant(request);
   if (!gate.ok) return gate.response;
@@ -44,11 +53,13 @@ export async function POST(request: NextRequest) {
     );
   }
 
+  const siteUrl = getPublicSiteUrl(request);
+
   // IMPORTANT:
-  // Send users straight to your reset page so the fragment lands on /auth/reset
-  // and the client can setSession() from the hash.
-  const origin = request.nextUrl.origin;
-  const redirectTo = `${origin}/auth/reset`;
+  // Recovery link should end up at /auth/reset with the URL fragment preserved.
+  // We route through /auth/callback?next=/auth/reset so the server can exchange the code,
+  // then redirect client to the correct reset page.
+  const redirectTo = `${siteUrl}/auth/callback?next=/auth/reset`;
 
   const supabaseAdmin = createClient(url, service, {
     auth: { autoRefreshToken: false, persistSession: false },
