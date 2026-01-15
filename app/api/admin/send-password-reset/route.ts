@@ -1,4 +1,3 @@
-// track-team-portal/app/api/admin/send-password-reset/route.ts
 import { NextResponse, type NextRequest } from "next/server";
 import { z } from "zod";
 import { createClient } from "@supabase/supabase-js";
@@ -10,55 +9,31 @@ const BodySchema = z.object({
   email: z.string().trim().email(),
 });
 
-function getPublicSiteUrl(request: NextRequest) {
-  // Prefer explicit env var (best for Vercel + consistency)
-  const envUrl = process.env.NEXT_PUBLIC_SITE_URL?.trim();
-  if (envUrl) return envUrl.replace(/\/+$/, "");
-
-  // Fallback: derive from request (works if Vercel forwards correctly)
-  return request.nextUrl.origin;
-}
-
 export async function POST(request: NextRequest) {
   const gate = await requireCoachOrAssistant(request);
   if (!gate.ok) return gate.response;
 
-  let body: unknown;
-  try {
-    body = await request.json();
-  } catch {
-    return NextResponse.json({ error: "Invalid JSON" }, { status: 400 });
-  }
-
+  const body = await request.json();
   const parsed = BodySchema.safeParse(body);
+
   if (!parsed.success) {
-    return NextResponse.json(
-      { error: "Invalid payload", details: parsed.error.flatten() },
-      { status: 400 }
-    );
+    return NextResponse.json({ error: "Invalid payload" }, { status: 400 });
   }
 
   const { email } = parsed.data;
 
   const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
   const service = process.env.SUPABASE_SERVICE_ROLE_KEY;
+  const siteUrl = process.env.NEXT_PUBLIC_SITE_URL;
 
-  if (!url || !service) {
+  if (!url || !service || !siteUrl) {
     return NextResponse.json(
-      {
-        error:
-          "Server misconfigured: missing NEXT_PUBLIC_SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY.",
-      },
+      { error: "Missing required environment variables." },
       { status: 500 }
     );
   }
 
-  const siteUrl = getPublicSiteUrl(request);
-
-  // IMPORTANT:
-  // Recovery link should end up at /auth/reset with the URL fragment preserved.
-  // We route through /auth/callback?next=/auth/reset so the server can exchange the code,
-  // then redirect client to the correct reset page.
+  // ALWAYS use canonical site URL (never request.origin)
   const redirectTo = `${siteUrl}/auth/callback?next=/auth/reset`;
 
   const supabaseAdmin = createClient(url, service, {
@@ -73,16 +48,16 @@ export async function POST(request: NextRequest) {
 
   if (error) {
     return NextResponse.json(
-      { error: `Failed to generate reset link: ${error.message}` },
+      { error: error.message },
       { status: 400 }
     );
   }
 
-  const actionLink = (data as any)?.properties?.action_link as string | undefined;
+  const actionLink = (data as any)?.properties?.action_link;
 
   if (!actionLink) {
     return NextResponse.json(
-      { error: "Reset link generated, but no action link was returned." },
+      { error: "Reset link not returned." },
       { status: 500 }
     );
   }
