@@ -9,17 +9,21 @@ const BodySchema = z.object({
   email: z.string().trim().email(),
 });
 
-// Prefer an explicit canonical site URL in production.
-// Fallbacks:
-// - VERCEL_URL is provided by Vercel (no protocol)
-// - request.nextUrl.origin works for local dev
 function getSiteOrigin(request: NextRequest) {
+  // 1) Explicit (recommended)
   const explicit = process.env.NEXT_PUBLIC_SITE_URL?.trim();
   if (explicit) return explicit.replace(/\/$/, "");
 
+  // 2) Vercel / proxy headers
+  const xfHost = request.headers.get("x-forwarded-host");
+  const xfProto = request.headers.get("x-forwarded-proto") || "https";
+  if (xfHost) return `${xfProto}://${xfHost}`.replace(/\/$/, "");
+
+  // 3) Vercel env fallback
   const vercel = process.env.VERCEL_URL?.trim();
   if (vercel) return `https://${vercel}`.replace(/\/$/, "");
 
+  // 4) Local/dev fallback
   return request.nextUrl.origin.replace(/\/$/, "");
 }
 
@@ -57,9 +61,12 @@ export async function POST(request: NextRequest) {
     );
   }
 
-  // Always route through callback then to the reset page
+  // IMPORTANT: Always point to your deployed site when available
   const siteOrigin = getSiteOrigin(request);
-  const redirectTo = `${siteOrigin}/auth/callback?next=/auth/reset`;
+
+  // Send them directly to the branded reset route (the page that accepts the hash)
+  // Your root page.tsx already forwards recovery hashes -> /auth/reset, so this is safe.
+  const redirectTo = `${siteOrigin}/auth/reset`;
 
   const supabaseAdmin = createClient(url, service, {
     auth: { autoRefreshToken: false, persistSession: false },
@@ -87,10 +94,11 @@ export async function POST(request: NextRequest) {
     );
   }
 
+  // Include this so you can SEE what the server thought your origin was
   return NextResponse.json({
     ok: true,
     reset_link: actionLink,
-    // Helpful for debugging (optional—remove if you want)
     site_origin_used: siteOrigin,
+    redirect_to_used: redirectTo,
   });
 }
