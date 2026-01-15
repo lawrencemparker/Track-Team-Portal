@@ -596,15 +596,32 @@ User role: ${role}. User name: ${fullName}.
       });
 
       for (const tc of assistant.tool_calls ?? []) {
-        // Tool calls can be unions depending on SDK version (function tools vs custom tools).
-        // Narrow safely instead of assuming tc.function exists.
-        const fn = (tc as any).function;
-        const toolName: string | undefined = fn?.name;
+  // Tool calls can be unions depending on SDK version (function tools vs custom tools).
+  // Narrow safely instead of assuming tc.function exists.
+  const fn = (tc as any).function;
+  const toolName: string | undefined = fn?.name;
 
-        if (!toolName) {
-          // Unknown/unsupported tool call shape; skip gracefully.
-          continue;
-        }
+  if (!toolName) {
+    // Unknown/unsupported tool call shape; skip gracefully.
+    continue;
+  }
+
+  let args: any = {};
+  try {
+    args = fn?.arguments ? JSON.parse(fn.arguments) : {};
+  } catch {
+    args = {};
+  }
+
+  const result = await runTool(toolName, args);
+
+  msgs.push({
+    role: "tool",
+    tool_call_id: tc.id,
+    content: JSON.stringify(result),
+  });
+}
+
 
         let args: any = {};
         try {
