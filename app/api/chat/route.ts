@@ -64,7 +64,7 @@ async function getUserRoleAndName(
  */
 function okText(text: string) {
   const clean =
-    (text || "").trim() || "I’m not sure. Can you rephrase the question?";
+    (text || "").trim() || "I'm not sure. Can you rephrase the question?";
   return NextResponse.json({ text: clean, reply: clean }, { status: 200 });
 }
 
@@ -75,7 +75,7 @@ function okText(text: string) {
  */
 function errJson(message: string, status = 500) {
   const fallback =
-    "Bran-DEE couldn’t generate a response right now. Please try again.";
+    "Bran-DEE couldn't generate a response right now. Please try again.";
   return NextResponse.json(
     { error: message, text: fallback, reply: fallback },
     { status }
@@ -100,7 +100,7 @@ export async function POST(req: Request) {
           getAll() {
             return cookieStore.getAll();
           },
-          setAll(cookiesToSet) {
+          setAll(cookiesToSet: any[]) {
             try {
               cookiesToSet.forEach(({ name, value, options }) => {
                 cookieStore.set(name, value, options);
@@ -252,7 +252,10 @@ export async function POST(req: Request) {
             "Find profile(s) by full name search. Returns user_id and full_name (and role).",
           parameters: {
             type: "object",
-            properties: { name: { type: "string" }, limit: { type: "number", default: 5 } },
+            properties: {
+              name: { type: "string" },
+              limit: { type: "number", default: 5 },
+            },
             required: ["name"],
             additionalProperties: false,
           },
@@ -576,12 +579,13 @@ User role: ${role}. User name: ${fullName}.
 
       const assistant = completion.choices?.[0]?.message;
       if (!assistant) {
-        return okText("I couldn’t generate a response. Please try again.");
+        return okText("I couldn't generate a response. Please try again.");
       }
 
       if (!assistant.tool_calls || assistant.tool_calls.length === 0) {
         const text =
-          assistant.content?.trim() || "I’m not sure. Can you rephrase the question?";
+          assistant.content?.trim() ||
+          "I'm not sure. Can you rephrase the question?";
         return okText(text);
       }
 
@@ -592,30 +596,24 @@ User role: ${role}. User name: ${fullName}.
       });
 
       for (const tc of assistant.tool_calls ?? []) {
-  // Tool calls can be unions depending on SDK version (function tools vs custom tools).
-  // Narrow safely instead of assuming tc.function exists.
-  const fn = (tc as any).function;
-  const name: string | undefined = fn?.name;
+        // Tool calls can be unions depending on SDK version (function tools vs custom tools).
+        // Narrow safely instead of assuming tc.function exists.
+        const fn = (tc as any).function;
+        const toolName: string | undefined = fn?.name;
 
-  if (!name) {
-    // If this is a custom tool call type, handle/skip here.
-    // You can log for visibility during debugging:
-    // console.warn("Unhandled tool call shape:", tc);
-    continue;
-  }
+        if (!toolName) {
+          // Unknown/unsupported tool call shape; skip gracefully.
+          continue;
+        }
 
-  let args: any = {};
-  try {
-    args = fn?.arguments ? JSON.parse(fn.arguments) : {};
-  } catch {
-    args = {};
-  }
+        let args: any = {};
+        try {
+          args = fn?.arguments ? JSON.parse(fn.arguments) : {};
+        } catch {
+          args = {};
+        }
 
-  // ... keep your existing routing/handler logic using `name` and `args`
-}
-
-
-        const result = await runTool(name, args);
+        const result = await runTool(toolName, args);
 
         msgs.push({
           role: "tool",
@@ -626,7 +624,7 @@ User role: ${role}. User name: ${fullName}.
     }
 
     return okText(
-      "I wasn’t able to pull everything needed to answer that in one pass. Try specifying the event (e.g., “100m”), and optionally a meet name/date or a specific athlete name."
+      "I wasn't able to pull everything needed to answer that in one pass. Try specifying the event (e.g., \"100m\"), and optionally a meet name/date or a specific athlete name."
     );
   } catch (e: any) {
     return errJson(e?.message ?? "Chat route error.", 500);

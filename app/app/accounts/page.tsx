@@ -26,12 +26,5 @@ export default async function AccountsPage() {
     );
   }
 
-  const { data: profile } = await supabase
-    .from("profiles")
-    .select("role")
-    .eq("user_id", user.id)
-    .maybeSingle();
-
-  const role = profile?.role ?? "athlete";
-  return <AccountsClient role={role} />;
+  return <AccountsClient />;
 }
