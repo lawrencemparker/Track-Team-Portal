@@ -1,7 +1,7 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
-import { createBrowserClient } from "@supabase/ssr";
+import { useEffect, useState } from "react";
+import { supabaseBrowser } from "@/lib/supabase/browser";
 
 function Spinner() {
   return (
@@ -13,11 +13,7 @@ function Spinner() {
 }
 
 export default function LoginClient() {
-  const supabase = useMemo(() => {
-    const url = process.env.NEXT_PUBLIC_SUPABASE_URL!;
-    const anon = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!;
-    return createBrowserClient(url, anon);
-  }, []);
+  const supabase = supabaseBrowser();
 
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -57,7 +53,7 @@ export default function LoginClient() {
 
       if (error) throw error;
 
-      // Let SSR session pick it up; client redirect is fine.
+      // Let SSR/cookies pick it up; client redirect is fine.
       window.location.href = "/app";
     } catch (err: any) {
       setError(err?.message ?? "Sign-in failed.");
@@ -70,7 +66,7 @@ export default function LoginClient() {
     <main className="min-h-screen">
       <div className="mx-auto max-w-6xl px-4 py-10">
         <div className="grid gap-6 lg:grid-cols-2">
-          {/* Left column */}
+          {/* Left column (restored) */}
           <section className="glass rounded-3xl p-6 lg:p-8 hidden lg:block">
             <div className="flex items-center gap-3">
               <div className="grid h-11 w-11 place-items-center rounded-2xl bg-white/10">
@@ -90,14 +86,11 @@ export default function LoginClient() {
 
               <h2 className="mt-5 text-lg font-semibold">Access</h2>
               <p className="mt-2 text-white/70">
-                Sign in using your school or team email address. Access is managed by
-                coaching staff.
+                Sign in using your school or team email address. Access is managed by coaching staff.
               </p>
 
               <div className="mt-6">
-                <div className="text-xs font-semibold text-white/60">
-                  Available modules
-                </div>
+                <div className="text-xs font-semibold text-white/60">Available modules</div>
                 <ul className="mt-3 space-y-3 text-sm text-white/80">
                   <li className="flex gap-3">
                     <span className="mt-0.5 text-emerald-300">✓</span>
@@ -114,34 +107,28 @@ export default function LoginClient() {
                 </ul>
 
                 <div className="mt-6 rounded-2xl border border-white/10 bg-white/5 p-4 text-sm text-white/70">
-                  <div className="text-xs font-semibold text-white/60">
-                    Access issue?
-                  </div>
+                  <div className="text-xs font-semibold text-white/60">Access issue?</div>
                   <div className="mt-1">
-                    If you cannot sign in, confirm your email is on the team roster or
-                    contact your coach.
+                    If you cannot sign in, confirm your email is on the team roster or contact your
+                    coach.
                   </div>
                 </div>
               </div>
             </div>
           </section>
 
-          {/* Right column */}
+          {/* Right column (login) */}
           <aside className="glass rounded-3xl p-6 lg:p-8">
             <div className="flex items-start justify-between gap-4">
               <div>
                 <h1 className="text-2xl font-semibold">Sign in</h1>
-                <p className="mt-1 text-white/70">
-                  Sign in using your email and password.
-                </p>
+                <p className="mt-1 text-white/70">Sign in using your email and password.</p>
               </div>
             </div>
 
             <form onSubmit={onSubmit} className="mt-6 space-y-4">
               <div>
-                <label className="text-xs font-semibold text-white/60">
-                  Email address
-                </label>
+                <label className="text-xs font-semibold text-white/60">Email address</label>
                 <input
                   id="login-email"
                   className="mt-2 w-full rounded-2xl border border-white/10 bg-black/20 px-4 py-3 text-white placeholder:text-white/35 outline-none ring-0 focus:border-white/20"
@@ -159,9 +146,7 @@ export default function LoginClient() {
               </div>
 
               <div>
-                <label className="text-xs font-semibold text-white/60">
-                  Password
-                </label>
+                <label className="text-xs font-semibold text-white/60">Password</label>
                 <input
                   className="mt-2 w-full rounded-2xl border border-white/10 bg-black/20 px-4 py-3 text-white placeholder:text-white/35 outline-none ring-0 focus:border-white/20"
                   placeholder="••••••••"
@@ -182,9 +167,7 @@ export default function LoginClient() {
                 className={[
                   "mt-1 w-full rounded-2xl px-4 py-3 font-semibold transition",
                   "inline-flex items-center justify-center gap-2",
-                  canSubmit && !sending
-                    ? "bg-white text-black hover:bg-white/90"
-                    : "",
+                  canSubmit && !sending ? "bg-white text-black hover:bg-white/90" : "",
                   !canSubmit || sending ? "bg-white/25 text-white/75" : "",
                 ].join(" ")}
               >
@@ -199,8 +182,7 @@ export default function LoginClient() {
               )}
 
               <div className="text-xs text-white/55">
-                Need access or forgot your password? Contact a coach for a password
-                reset link.
+                Need access or forgot your password? Contact a coach for a password reset link.
               </div>
             </form>
           </aside>

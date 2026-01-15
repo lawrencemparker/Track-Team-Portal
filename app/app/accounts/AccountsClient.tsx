@@ -38,6 +38,7 @@ export default function AccountsClient() {
   const [error, setError] = useState<string | null>(null);
   const [toast, setToast] = useState<string | null>(null);
 
+  // Coach-assisted reset helper (copy/paste link workflow)
   const [resetLink, setResetLink] = useState<string | null>(null);
   const [resetTargetEmail, setResetTargetEmail] = useState<string | null>(null);
   const [resetTargetName, setResetTargetName] = useState<string | null>(null);
@@ -230,9 +231,7 @@ export default function AccountsClient() {
       if (!res.ok) throw new Error(json?.error ?? "Failed to update account.");
 
       if (json?.account?.user_id) {
-        setRows((prev) =>
-          prev.map((x) => (x.user_id === r.user_id ? (json.account as AccountRow) : x))
-        );
+        setRows((prev) => prev.map((x) => (x.user_id === r.user_id ? (json.account as AccountRow) : x)));
       }
 
       setToast("Account updated.");
@@ -246,9 +245,13 @@ export default function AccountsClient() {
     }
   }
 
+  // Delete: MUST confirm before deleting
   async function deleteAccount(r: AccountRow) {
     if (!canAdmin) return;
-    if (!confirm(`Delete account for ${r.full_name ?? r.email ?? "this user"}?`)) return;
+
+    const label = r.full_name ?? r.email ?? "this user";
+    const ok = window.confirm(`Delete account for ${label}?\n\nThis will permanently remove the user.`);
+    if (!ok) return;
 
     setError(null);
     setToast(null);
@@ -273,9 +276,13 @@ export default function AccountsClient() {
     }
   }
 
+  // Reset password: coach-assisted copy/paste reset link workflow
   async function requestPasswordReset(r: AccountRow) {
     if (!canAdmin) return;
-    if (!r.email) return;
+
+    const em = (r.email ?? "").trim();
+    if (!em) return setError("No email found for this account.");
+    if (!isValidEmail(em)) return setError("Please enter a valid email address for this account.");
 
     setError(null);
     setToast(null);
@@ -285,15 +292,19 @@ export default function AccountsClient() {
       const res = await fetch("/api/admin/send-password-reset", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ email: r.email }),
+        body: JSON.stringify({ email: em }),
       });
 
       const json = await res.json();
       if (!res.ok) throw new Error(json?.error ?? "Failed to generate reset link.");
 
-      setResetLink(json?.link ?? null);
-      setResetTargetEmail(r.email);
-      setResetTargetName(r.full_name ?? r.email);
+      // IMPORTANT: existing backend returns reset_link (coach-assisted workflow)
+      const link = (json?.reset_link ?? null) as string | null;
+      if (!link) throw new Error("Reset link was not returned.");
+
+      setResetLink(link);
+      setResetTargetEmail(em);
+      setResetTargetName((r.full_name ?? "").trim() || em);
     } catch (e: any) {
       setError(e?.message ?? "Failed to generate reset link.");
     } finally {
@@ -318,8 +329,10 @@ export default function AccountsClient() {
 
   const mailtoLink =
     resetLink && resetTargetEmail
-      ? `mailto:${resetTargetEmail}?subject=${encodeURIComponent("Password reset link")}&body=${encodeURIComponent(
-          resetLink
+      ? `mailto:${resetTargetEmail}?subject=${encodeURIComponent(
+          "Track Team Portal password reset link"
+        )}&body=${encodeURIComponent(
+          `Hi${resetTargetName ? ` ${resetTargetName}` : ""},\n\nHere is your password reset link for the Track Team Portal:\n\n${resetLink}\n\nOpen the link and set a new password.\n\n— Coach`
         )}`
       : null;
 
@@ -329,9 +342,7 @@ export default function AccountsClient() {
         <div className="flex items-start justify-between gap-4">
           <div>
             <div className="text-3xl font-bold text-white">Accounts</div>
-            <div className="mt-1 text-sm text-white/70">
-              Manage coach, assistant coach, and athlete accounts.
-            </div>
+            <div className="mt-1 text-sm text-white/70">Manage coach, assistant coach, and athlete accounts.</div>
           </div>
 
           <button type="button" onClick={refresh} className={pillBtn} disabled={loading}>
@@ -507,7 +518,6 @@ export default function AccountsClient() {
         </div>
 
         <div className="mt-6 overflow-x-auto">
-          {/* table-fixed + explicit widths prevents edit mode from reflowing the table */}
           <table className="w-full table-fixed text-left">
             <thead>
               <tr className="text-xs font-semibold tracking-wide text-white/70">
@@ -557,9 +567,7 @@ export default function AccountsClient() {
                           </>
                         )}
 
-                        {rowError[r.user_id] ? (
-                          <div className="mt-2 text-xs text-red-200">{rowError[r.user_id]}</div>
-                        ) : null}
+                        {rowError[r.user_id] ? <div className="mt-2 text-xs text-red-200">{rowError[r.user_id]}</div> : null}
                       </td>
 
                       <td className="py-4 pr-3">
@@ -611,42 +619,24 @@ export default function AccountsClient() {
                             <option value="female">Female</option>
                           </select>
                         ) : (
-                          <span className="text-white/80">
-                            {r.gender ? (r.gender === "male" ? "Male" : "Female") : "—"}
-                          </span>
+                          <span className="text-white/80">{r.gender ? (r.gender === "male" ? "Male" : "Female") : "—"}</span>
                         )}
                       </td>
 
-                      {/* Actions: fixed width + no reflow, always visible/clickable */}
                       <td className="py-4">
                         <div className="flex flex-wrap items-center gap-2">
                           {isEditing ? (
                             <>
-                              <button
-                                type="button"
-                                className={pillBtn}
-                                disabled={rowBusy}
-                                onClick={() => saveEdit(r)}
-                              >
+                              <button type="button" className={pillBtn} disabled={rowBusy} onClick={() => saveEdit(r)}>
                                 Save
                               </button>
-                              <button
-                                type="button"
-                                className={pillBtn}
-                                disabled={rowBusy}
-                                onClick={cancelEdit}
-                              >
+                              <button type="button" className={pillBtn} disabled={rowBusy} onClick={cancelEdit}>
                                 Cancel
                               </button>
                             </>
                           ) : (
                             <>
-                              <button
-                                type="button"
-                                className={pillBtn}
-                                disabled={!canAdmin || rowBusy}
-                                onClick={() => beginEdit(r)}
-                              >
+                              <button type="button" className={pillBtn} disabled={!canAdmin || rowBusy} onClick={() => beginEdit(r)}>
                                 Edit
                               </button>
 
@@ -659,12 +649,7 @@ export default function AccountsClient() {
                                 Reset password
                               </button>
 
-                              <button
-                                type="button"
-                                className={pillBtn}
-                                disabled={!canAdmin || rowBusy}
-                                onClick={() => deleteAccount(r)}
-                              >
+                              <button type="button" className={pillBtn} disabled={!canAdmin || rowBusy} onClick={() => deleteAccount(r)}>
                                 Delete
                               </button>
                             </>

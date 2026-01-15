@@ -66,6 +66,7 @@ export default function AssignmentsClient({ role }: { role: Role }) {
 
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string>("");
+  const [notice, setNotice] = useState<string>("");
 
   const [userId, setUserId] = useState<string>("");
 
@@ -104,17 +105,20 @@ export default function AssignmentsClient({ role }: { role: Role }) {
     [selectedMeet]
   );
 
-  const meetEventByName = useMemo(() => {
+  // IMPORTANT: cache meet_events by (meet_id + event_name) to avoid cross-meet collisions.
+  const meetEventByKey = useMemo(() => {
     const map = new Map<string, MeetEventRow>();
     for (const me of meetEvents) {
       const n = safeMeetEventName(me);
-      if (n) map.set(n, me);
+      if (!n) continue;
+      map.set(`${me.meet_id}__${n}`, me);
     }
     return map;
   }, [meetEvents]);
 
   async function refreshAll() {
     setError("");
+    setNotice("");
     setLoading(true);
 
     try {
@@ -190,6 +194,9 @@ export default function AssignmentsClient({ role }: { role: Role }) {
     if (!meetId) return;
 
     setError("");
+// Do NOT clear notice here. saveAssignment() relies on loadMeetContext() refresh,
+// and clearing here would immediately wipe the success notification.
+
 
     // meet_events
     const { data: meData, error: meErr } = await supabase
@@ -298,8 +305,9 @@ export default function AssignmentsClient({ role }: { role: Role }) {
   }
 
   async function ensureMeetEvent(meetId: string, eventName: string): Promise<MeetEventRow> {
-    const existing = meetEventByName.get(eventName);
-    if (existing) return existing;
+    const key = `${meetId}__${eventName}`;
+    const cached = meetEventByKey.get(key);
+    if (cached) return cached;
 
     const { data: found, error: findErr } = await supabase
       .from("meet_events")
@@ -332,6 +340,7 @@ export default function AssignmentsClient({ role }: { role: Role }) {
     if (!canWrite) return;
 
     setError("");
+    setNotice("");
 
     try {
       if (!selectedMeetId) return;
@@ -340,6 +349,19 @@ export default function AssignmentsClient({ role }: { role: Role }) {
       if (!status) return;
 
       const me = await ensureMeetEvent(selectedMeetId, selectedEventName);
+
+      // REQUIRED: pre-check existing assignment for this athlete + meet_event
+      const { data: existingRow, error: existingErr } = await supabase
+        .from("assignments")
+        .select("id,status")
+        .eq("meet_event_id", me.id)
+        .eq("athlete_id", selectedAthleteId)
+        .maybeSingle();
+
+      if (existingErr) throw existingErr;
+
+      const prevStatus = String(existingRow?.status ?? "").toLowerCase().trim();
+      const nextStatus = String(status ?? "").toLowerCase().trim();
 
       const { data: up, error: upErr } = await supabase
         .from("assignments")
@@ -353,6 +375,17 @@ export default function AssignmentsClient({ role }: { role: Role }) {
       if (upErr) throw upErr;
 
       const inserted = up as AssignmentRow;
+
+      // REQUIRED NOTIFICATIONS:
+      // 1) Same-status duplicate
+      // 2) Status update (assigned <-> alternate)
+      if (existingRow) {
+        if (prevStatus === nextStatus) {
+          setNotice(`No changes made. This athlete is already ${nextStatus} for this event.`);
+        } else {
+          setNotice(`Assignment updated: status changed from "${prevStatus}" to "${nextStatus}".`);
+        }
+      }
 
       // Optimistic UI update
       const athleteName =
@@ -368,7 +401,10 @@ export default function AssignmentsClient({ role }: { role: Role }) {
 
       setAssignments((prev) => {
         const withoutDup = prev.filter(
-          (x) => !(x.meet_event_id === inserted.meet_event_id && x.athlete_id === inserted.athlete_id)
+          (x) =>
+            !(
+              x.meet_event_id === inserted.meet_event_id && x.athlete_id === inserted.athlete_id
+            )
         );
         return [inserted, ...withoutDup];
       });
@@ -381,7 +417,8 @@ export default function AssignmentsClient({ role }: { role: Role }) {
       // Keep consistent (safe reload)
       await loadMeetContext(selectedMeetId);
     } catch (e: any) {
-      setError(e?.message ?? "Failed to save assignment.");
+      // IMPORTANT: never reference removed variables; show only real errors.
+      setError(String(e?.message ?? "Unable to save assignment."));
     }
   }
 
@@ -389,6 +426,7 @@ export default function AssignmentsClient({ role }: { role: Role }) {
     if (!canWrite) return;
 
     setError("");
+    setNotice("");
 
     // optimistic remove immediately
     setAssignments((prev) => prev.filter((r) => r.id !== id));
@@ -443,6 +481,12 @@ export default function AssignmentsClient({ role }: { role: Role }) {
         {error ? (
           <div className="mt-5 rounded-2xl border border-red-500/20 bg-red-500/10 px-4 py-3 text-sm text-red-100">
             {error}
+          </div>
+        ) : null}
+
+        {notice ? (
+          <div className="mt-3 rounded-2xl border border-emerald-500/20 bg-emerald-500/10 px-4 py-3 text-sm text-emerald-100">
+            {notice}
           </div>
         ) : null}
       </div>
@@ -503,7 +547,11 @@ export default function AssignmentsClient({ role }: { role: Role }) {
 
             <div className="min-w-0">
               <label className="text-xs text-white/60">Status</label>
-              <select className={selectCls} value={status} onChange={(e) => setStatus(e.target.value)}>
+              <select
+                className={selectCls}
+                value={status}
+                onChange={(e) => setStatus(e.target.value)}
+              >
                 <option value="assigned">assigned</option>
                 <option value="alternate">alternate</option>
               </select>

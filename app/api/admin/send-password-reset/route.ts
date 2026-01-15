@@ -1,3 +1,4 @@
+// track-team-portal/app/api/admin/send-password-reset/route.ts
 import { NextResponse, type NextRequest } from "next/server";
 import { z } from "zod";
 import { createClient } from "@supabase/supabase-js";
@@ -43,9 +44,11 @@ export async function POST(request: NextRequest) {
     );
   }
 
-  // Always route through auth callback, then to your branded reset page
+  // IMPORTANT:
+  // Send users straight to your reset page so the fragment lands on /auth/reset
+  // and the client can setSession() from the hash.
   const origin = request.nextUrl.origin;
-  const redirectTo = `${origin}/auth/callback?next=/reset-password`;
+  const redirectTo = `${origin}/auth/reset`;
 
   const supabaseAdmin = createClient(url, service, {
     auth: { autoRefreshToken: false, persistSession: false },

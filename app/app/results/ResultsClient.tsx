@@ -402,12 +402,30 @@ export default function ResultsClient() {
 
     const { error } = await supabase.from("results").upsert(payload);
 
-    setSaving(false);
+setSaving(false);
 
-    if (error) {
-      setError(error.message);
-      return;
-    }
+if (error) {
+  const anyErr = error as any;
+  const msg = String(anyErr?.message ?? "");
+  const code = String(anyErr?.code ?? "");
+
+  // Friendly duplicate-result message (athlete already has a result for this event)
+  if (
+    code === "23505" ||
+    msg.includes("results_meet_event_id_athlete_id_key") ||
+    msg.toLowerCase().includes("duplicate key value violates unique constraint")
+  ) {
+    setError(
+      "This athlete already has a result recorded for this event. If you need to change it, delete the existing result below and then re-enter the updated mark."
+    );
+    return;
+  }
+
+  // Fallback to the raw error for anything else
+  setError(msg || "Unable to save result. Please try again.");
+  return;
+}
+
 
     setMark("");
     setPlace("");

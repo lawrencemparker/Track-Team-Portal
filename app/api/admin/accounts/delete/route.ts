@@ -28,13 +28,23 @@ export async function POST(request: NextRequest) {
   const { user_id } = parsed.data;
   const admin = supabaseAdmin();
 
-  // Delete profile first (optional but keeps DB clean)
-  await admin.from("profiles").delete().eq("user_id", user_id);
+  /**
+   * SOFT DELETE / DEACTIVATE
+   * -----------------------
+   * We must retain historical Assignments + Results.
+   * Those records reference profiles.user_id, so we must NOT delete:
+   *  - auth.users row
+   *  - profiles row
+   *
+   * Instead, prevent future login by banning the auth user indefinitely.
+   */
+  const { error } = await admin.auth.admin.updateUserById(user_id, {
+    ban_duration: "876000h", // ~100 years = effectively permanent
+  });
 
-  const { error } = await admin.auth.admin.deleteUser(user_id);
   if (error) {
     return NextResponse.json({ error: error.message }, { status: 400 });
   }
 
-  return NextResponse.json({ ok: true });
+  return NextResponse.json({ ok: true, status: "deactivated" });
 }

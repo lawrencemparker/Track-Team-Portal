@@ -5,45 +5,70 @@ $ErrorActionPreference = "Stop"
 
 Write-Host "=== Track-Team-Portal GitHub Push Script ==="
 
-# Confirm we're in the right folder
 if (!(Test-Path ".\package.json")) {
   Write-Host "WARNING: package.json not found in this folder."
   Write-Host "Make sure you are in your Next.js project root before running."
 }
 
-# Initialize git only if needed
+# Ensure git exists
+git --version | Out-Null
+
+# Init git if needed
 if (!(Test-Path ".\.git")) {
   git init
 }
 
-# Stage + commit (commit will fail if nothing changed; that's OK)
+# Ensure a user identity exists (commit/merge will fail without this)
+$gitName = git config user.name
+$gitEmail = git config user.email
+if ([string]::IsNullOrWhiteSpace($gitName) -or [string]::IsNullOrWhiteSpace($gitEmail)) {
+  Write-Host "Git user.name / user.email not set. Setting local defaults..."
+  git config user.name "Lawrence Parker"
+  git config user.email "lawrencemparker@users.noreply.github.com"
+}
+
+# Stage changes
 git add -A
-try {
-  git commit -m "Initial commit"
-} catch {
-  Write-Host "No new changes to commit (or commit already exists). Continuing..."
+
+# Commit if there is anything to commit
+$hasChanges = git status --porcelain
+if ($hasChanges) {
+  git commit -m "Update"
+} else {
+  Write-Host "No changes to commit. Continuing..."
 }
 
 # Ensure branch is main
 git branch -M main
 
-# Add remote if missing
-$remoteCheck = git remote 2>$null
-if ($remoteCheck -notcontains "origin") {
+# Set remote
+$remoteNames = git remote
+if ($remoteNames -notcontains "origin") {
   git remote add origin https://github.com/lawrencemparker/Track-Team-Portal.git
 } else {
   git remote set-url origin https://github.com/lawrencemparker/Track-Team-Portal.git
 }
 
-# Sync with existing repo (if it has commits like README)
+# Fetch remote refs
 git fetch origin
-try {
-  git pull origin main --allow-unrelated-histories
-} catch {
-  Write-Host "Pull failed (possibly no remote main yet). Continuing to push..."
+
+# Only sync if origin/main exists
+$remoteMainExists = git ls-remote --heads origin main
+if ($remoteMainExists) {
+  # Prefer rebase to avoid merge commits / editor prompts
+  try {
+    git pull --rebase origin main
+  } catch {
+    Write-Host "Pull --rebase failed. You may have conflicts. Run:"
+    Write-Host "  git status"
+    Write-Host "  git rebase --abort   (to cancel)"
+    throw
+  }
+} else {
+  Write-Host "Remote main not found yet. First push will create it."
 }
 
-# Push to main
+# Push
 git push -u origin main
 
 Write-Host "=== Done. Repo pushed to main. ==="
