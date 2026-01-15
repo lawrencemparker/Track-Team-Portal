@@ -591,14 +591,29 @@ User role: ${role}. User name: ${fullName}.
         tool_calls: assistant.tool_calls,
       });
 
-      for (const tc of assistant.tool_calls) {
-        const name = tc.function.name;
-        let args: any = {};
-        try {
-          args = tc.function.arguments ? JSON.parse(tc.function.arguments) : {};
-        } catch {
-          args = {};
-        }
+      for (const tc of assistant.tool_calls ?? []) {
+  // Tool calls can be unions depending on SDK version (function tools vs custom tools).
+  // Narrow safely instead of assuming tc.function exists.
+  const fn = (tc as any).function;
+  const name: string | undefined = fn?.name;
+
+  if (!name) {
+    // If this is a custom tool call type, handle/skip here.
+    // You can log for visibility during debugging:
+    // console.warn("Unhandled tool call shape:", tc);
+    continue;
+  }
+
+  let args: any = {};
+  try {
+    args = fn?.arguments ? JSON.parse(fn.arguments) : {};
+  } catch {
+    args = {};
+  }
+
+  // ... keep your existing routing/handler logic using `name` and `args`
+}
+
 
         const result = await runTool(name, args);
 
