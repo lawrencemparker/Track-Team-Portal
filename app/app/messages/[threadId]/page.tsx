@@ -1,5 +1,11 @@
 import { supabaseServer } from "@/lib/supabase/server";
-import MessagesClient from "../MessagesClient";
+import MessagesClient from "../../MessagesClient";
+
+export default function Page({ params }: { params: { threadId: string } }) {
+  const threadId = params.threadId;
+  return <MessagesClient initialThreadId={threadId} />;
+}
+
 
 export const dynamic = "force-dynamic";
 

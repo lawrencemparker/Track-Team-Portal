@@ -76,7 +76,7 @@ function useIsMobile(breakpointPx = 768) {
   return isMobile;
 }
 
-export default function MessagesClient() {
+export default function MessagesClient({ initialThreadId }: { initialThreadId?: string }) {
   const router = useRouter();
   const isMobile = useIsMobile(768);
 
@@ -103,7 +103,7 @@ export default function MessagesClient() {
   // Compose (reply)
   const [reply, setReply] = useState("");
 
-  // Optional: reply draft persistence per thread (helps on mobile + desktop)
+  // Optional: reply draft persistence per thread
   const [replyDraftByThread, setReplyDraftByThread] = useState<Record<string, string>>({});
 
   // New Message modal (coach-only) - desktop only
@@ -115,6 +115,9 @@ export default function MessagesClient() {
 
   const activeThreadRef = useRef<string | null>(null);
   activeThreadRef.current = activeThreadId;
+
+  // Ensure initialThreadId is only applied once (prevents loops)
+  const initialAppliedRef = useRef(false);
 
   // Scroll handling: keep pinned to bottom if user is near bottom
   const threadScrollRef = useRef<HTMLDivElement | null>(null);
@@ -185,10 +188,38 @@ export default function MessagesClient() {
     };
   }, [supabase]);
 
-  // When switching to a thread view on mobile/desktop, default to "pinned"
+  // When switching to a thread view, default to "pinned"
   useEffect(() => {
     autoScrollEnabledRef.current = true;
   }, [activeThreadId]);
+
+  // Apply initialThreadId (once) after we have threads + me
+  useEffect(() => {
+    if (!me?.id) return;
+    if (!initialThreadId) return;
+    if (initialAppliedRef.current) return;
+    if (loading) return;
+
+    // Only apply if the thread exists in current visible thread list (RLS enforced)
+    const exists = threads.some((t) => t.id === initialThreadId);
+    if (!exists) {
+      initialAppliedRef.current = true; // prevent repeating attempts
+      return;
+    }
+
+    initialAppliedRef.current = true;
+    (async () => {
+      // Persist current draft if any
+      if (activeThreadId) {
+        setReplyDraftByThread((prev) => ({ ...prev, [activeThreadId]: reply }));
+      }
+
+      setActiveThreadId(initialThreadId);
+      setReply(replyDraftByThread[initialThreadId] ?? "");
+      await loadThreadMessages(initialThreadId, me.id, true);
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [me?.id, initialThreadId, loading, threads]);
 
   // -----------------------------
   // Realtime: listen for new messages/participants and refresh UI
@@ -763,13 +794,11 @@ export default function MessagesClient() {
                 </button>
               </div>
 
-              {/* NOTE: show here only on mobile to avoid duplication */}
               {isMobile && (
                 <div className="mt-2 text-xs text-white/50">Note: Editing/deleting messages is disabled by policy.</div>
               )}
             </div>
 
-            {/* Desktop note (single instance) */}
             {!isMobile && (
               <div className="mt-2 text-xs text-white/50">Note: Editing/deleting messages is disabled by policy.</div>
             )}
