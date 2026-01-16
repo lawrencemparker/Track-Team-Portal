@@ -74,7 +74,10 @@ export default async function AppLayout({ children }: { children: ReactNode }) {
             <NavItem href="/app/assignments" label="Assignments" />
             <NavItem href="/app/results" label="Results" />
 
-            {/* NEW: Chat */}
+            {/* NEW: Messaging */}
+            <NavItem href="/app/messages" label="Messages" />
+
+            {/* Existing: Chat */}
             <NavItem href="/app/chat" label="Chat with Bran-DEE" />
 
             {canAdmin && <NavItem href="/app/accounts" label="Accounts" />}

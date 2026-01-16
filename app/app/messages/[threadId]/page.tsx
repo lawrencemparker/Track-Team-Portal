@@ -1,10 +1,13 @@
 import { supabaseServer } from "@/lib/supabase/server";
-import AccountsClient from "./AccountsClient";
-import { redirect } from "next/navigation";
+import MessagesClient from "../MessagesClient";
 
 export const dynamic = "force-dynamic";
 
-export default async function AccountsPage() {
+export default async function MessageThreadPage({
+  params,
+}: {
+  params: Promise<{ threadId: string }>;
+}) {
   const supabase = await supabaseServer();
   const {
     data: { user },
@@ -27,16 +30,6 @@ export default async function AccountsPage() {
     );
   }
 
-  const { data: profile } = await supabase
-    .from("profiles")
-    .select("role")
-    .eq("user_id", user.id)
-    .maybeSingle();
-
-  const role = profile?.role ?? "athlete";
-  const canAdmin = role === "coach" || role === "assistant_coach";
-
-  if (!canAdmin) redirect("/app");
-
-  return <AccountsClient />;
+  const { threadId } = await params;
+  return <MessagesClient initialThreadId={threadId} />;
 }
