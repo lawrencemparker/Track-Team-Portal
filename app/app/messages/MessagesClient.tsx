@@ -2,6 +2,7 @@
 
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { createBrowserClient } from "@supabase/ssr";
+import { useRouter } from "next/navigation";
 
 type ThreadRow = {
   id: string;
@@ -36,13 +37,49 @@ type ProfileRow = {
 function fmtTime(iso: string) {
   try {
     const d = new Date(iso);
-    return d.toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+    return d.toLocaleString(undefined, {
+      month: "short",
+      day: "numeric",
+      hour: "numeric",
+      minute: "2-digit",
+    });
   } catch {
     return iso;
   }
 }
 
+/**
+ * Mobile detection hook: true when viewport < breakpoint (default 768px).
+ * Safe for SSR (guards window).
+ */
+function useIsMobile(breakpointPx = 768) {
+  const [isMobile, setIsMobile] = useState(false);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+
+    const mq = window.matchMedia(`(max-width: ${breakpointPx - 1}px)`);
+    const apply = () => setIsMobile(mq.matches);
+
+    apply();
+
+    // Safari fallback
+    if (typeof mq.addEventListener === "function") {
+      mq.addEventListener("change", apply);
+      return () => mq.removeEventListener("change", apply);
+    } else {
+      mq.addListener(apply);
+      return () => mq.removeListener(apply);
+    }
+  }, [breakpointPx]);
+
+  return isMobile;
+}
+
 export default function MessagesClient() {
+  const router = useRouter();
+  const isMobile = useIsMobile(768);
+
   const supabase = useMemo(() => {
     const url = process.env.NEXT_PUBLIC_SUPABASE_URL!;
     const anon = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!;
@@ -66,7 +103,10 @@ export default function MessagesClient() {
   // Compose (reply)
   const [reply, setReply] = useState("");
 
-  // New Message modal (coach-only)
+  // Optional: reply draft persistence per thread (helps on mobile + desktop)
+  const [replyDraftByThread, setReplyDraftByThread] = useState<Record<string, string>>({});
+
+  // New Message modal (coach-only) - desktop only
   const [showNew, setShowNew] = useState(false);
   const [athletes, setAthletes] = useState<ProfileRow[]>([]);
   const [newAthleteId, setNewAthleteId] = useState("");
@@ -75,6 +115,24 @@ export default function MessagesClient() {
 
   const activeThreadRef = useRef<string | null>(null);
   activeThreadRef.current = activeThreadId;
+
+  // Scroll handling: keep pinned to bottom if user is near bottom
+  const threadScrollRef = useRef<HTMLDivElement | null>(null);
+  const bottomRef = useRef<HTMLDivElement | null>(null);
+  const autoScrollEnabledRef = useRef(true); // updated on scroll
+
+  function updateAutoScrollFlag() {
+    const el = threadScrollRef.current;
+    if (!el) return;
+    const thresholdPx = 120; // "near bottom" tolerance
+    const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
+    autoScrollEnabledRef.current = distanceFromBottom <= thresholdPx;
+  }
+
+  function scrollToBottom(mode: "auto" | "force" = "auto") {
+    if (mode === "auto" && !autoScrollEnabledRef.current) return;
+    bottomRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
+  }
 
   // -----------------------------
   // Bootstrap: session + my profile/role
@@ -125,56 +183,58 @@ export default function MessagesClient() {
     return () => {
       cancelled = true;
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [supabase]);
+
+  // When switching to a thread view on mobile/desktop, default to "pinned"
+  useEffect(() => {
+    autoScrollEnabledRef.current = true;
+  }, [activeThreadId]);
 
   // -----------------------------
   // Realtime: listen for new messages/participants and refresh UI
-  // (Prevents “click back and forth” issue)
   // -----------------------------
   useEffect(() => {
     if (!me?.id) return;
 
     const ch = supabase
       .channel("messages-realtime")
-      .on(
-        "postgres_changes",
-        { event: "INSERT", schema: "public", table: "messages" },
-        async (payload) => {
-          const row = payload.new as any as MessageRow;
+      .on("postgres_changes", { event: "INSERT", schema: "public", table: "messages" }, async (payload) => {
+        const row = payload.new as any as MessageRow;
 
-          // If message belongs to active thread, append immediately
-          if (activeThreadRef.current && row.thread_id === activeThreadRef.current) {
-            setMessages((prev) => {
-              if (prev.some((m) => m.id === row.id)) return prev;
-              return [...prev, row].sort((a, b) => a.created_at.localeCompare(b.created_at));
-            });
+        // If message belongs to active thread, append immediately
+        if (activeThreadRef.current && row.thread_id === activeThreadRef.current) {
+          setMessages((prev) => {
+            if (prev.some((m) => m.id === row.id)) return prev;
+            return [...prev].concat(row).sort((a, b) => a.created_at.localeCompare(b.created_at));
+          });
 
-            // If incoming (not mine), mark read (so unread clears instantly)
-            if (row.sender_user_id !== me.id) {
-              await markThreadRead(row.thread_id, me.id);
-            }
+          // If incoming (not mine), mark read ONLY because the thread is open
+          if (row.sender_user_id !== me.id) {
+            await markThreadRead(row.thread_id, me.id);
           }
 
-          // Always refresh thread summaries so inbox updates without navigation
-          await reloadSummaries(me.id);
+          setTimeout(() => scrollToBottom("auto"), 0);
         }
-      )
-      .on(
-        "postgres_changes",
-        { event: "INSERT", schema: "public", table: "message_thread_participants" },
-        async () => {
-          // New thread membership -> refresh summaries
-          await reloadSummaries(me.id);
-        }
-      )
+
+        // Always refresh thread summaries so inbox updates without navigation
+        await reloadSummaries(me.id);
+      })
+      .on("postgres_changes", { event: "INSERT", schema: "public", table: "message_thread_participants" }, async () => {
+        await reloadSummaries(me.id);
+      })
       .subscribe();
 
     return () => {
       supabase.removeChannel(ch);
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [supabase, me?.id]);
+
+  // Auto-scroll when messages change (covers initial load + send) if user is near bottom
+  useEffect(() => {
+    if (!activeThreadId) return;
+    scrollToBottom("auto");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [messages.length, activeThreadId]);
 
   // -----------------------------
   // Data loaders
@@ -182,7 +242,6 @@ export default function MessagesClient() {
   async function reloadAll(uid: string) {
     await reloadSummaries(uid);
 
-    // Auto-select first thread if none selected
     setActiveThreadId((cur) => {
       if (cur) return cur;
       return null;
@@ -203,7 +262,7 @@ export default function MessagesClient() {
       return;
     }
 
-    // 2) Participants for those threads (RLS enforced)
+    // 2) Participants (includes last_read_at)
     const { data: part, error: partErr } = await supabase
       .from("message_thread_participants")
       .select("thread_id,user_id,added_by,created_at,last_read_at");
@@ -219,8 +278,7 @@ export default function MessagesClient() {
     setThreads(threadsList);
     setParticipants(partsList);
 
-    // 3) Fetch a recent slice of messages to compute latest + unread counts efficiently
-    // (Avoids one request per thread.)
+    // 3) Recent slice of messages for latest + unread calc
     const { data: msgSlice, error: msgErr } = await supabase
       .from("messages")
       .select("id,thread_id,sender_user_id,body,created_at")
@@ -234,7 +292,7 @@ export default function MessagesClient() {
 
     const slice = (msgSlice ?? []) as MessageRow[];
 
-    // Latest per thread (from slice)
+    // Latest per thread
     const latestMap: Record<string, MessageRow | null> = {};
     for (const m of slice) {
       if (!latestMap[m.thread_id]) latestMap[m.thread_id] = m;
@@ -257,7 +315,7 @@ export default function MessagesClient() {
       setProfilesById((prev) => ({ ...prev, ...map }));
     }
 
-    // Unread counts per thread (for current user only)
+    // Unread counts for current user
     const myLastReadByThread: Record<string, string> = {};
     for (const p of partsList) {
       if (p.user_id === uid) {
@@ -268,7 +326,7 @@ export default function MessagesClient() {
     const unreadMap: Record<string, number> = {};
     for (const m of slice) {
       const lastRead = myLastReadByThread[m.thread_id];
-      if (!lastRead) continue; // not a participant
+      if (!lastRead) continue;
       if (m.created_at > lastRead && m.sender_user_id !== uid) {
         unreadMap[m.thread_id] = (unreadMap[m.thread_id] ?? 0) + 1;
       }
@@ -283,7 +341,7 @@ export default function MessagesClient() {
     });
   }
 
-  async function loadThreadMessages(threadId: string, uid: string) {
+  async function loadThreadMessages(threadId: string, uid: string, markRead: boolean) {
     setErr(null);
 
     const { data, error } = await supabase
@@ -297,13 +355,18 @@ export default function MessagesClient() {
       return;
     }
 
+    autoScrollEnabledRef.current = true;
     setMessages((data ?? []) as MessageRow[]);
-    await markThreadRead(threadId, uid);
-    await reloadSummaries(uid); // ensures unread badge clears immediately
+
+    setTimeout(() => scrollToBottom("force"), 0);
+
+    if (markRead) {
+      await markThreadRead(threadId, uid);
+      await reloadSummaries(uid);
+    }
   }
 
   async function markThreadRead(threadId: string, uid: string) {
-    // Update only my participant row (requires policy you added)
     await supabase
       .from("message_thread_participants")
       .update({ last_read_at: new Date().toISOString() })
@@ -316,8 +379,24 @@ export default function MessagesClient() {
   // -----------------------------
   async function onSelectThread(tid: string) {
     if (!me) return;
+
+    if (activeThreadId) {
+      setReplyDraftByThread((prev) => ({ ...prev, [activeThreadId]: reply }));
+    }
+
     setActiveThreadId(tid);
-    await loadThreadMessages(tid, me.id);
+    setReply(replyDraftByThread[tid] ?? "");
+
+    await loadThreadMessages(tid, me.id, true);
+  }
+
+  function onMobileBackToInbox() {
+    if (activeThreadId) {
+      setReplyDraftByThread((prev) => ({ ...prev, [activeThreadId]: reply }));
+    }
+    setActiveThreadId(null);
+    setMessages([]);
+    setReply("");
   }
 
   async function onRefresh() {
@@ -325,18 +404,9 @@ export default function MessagesClient() {
     setBusy("refresh");
     try {
       await reloadSummaries(me.id);
-
-// Only re-fetch the active thread’s messages WITHOUT marking read
-if (activeThreadId) {
-  const { data, error } = await supabase
-    .from("messages")
-    .select("id,thread_id,sender_user_id,body,created_at")
-    .eq("thread_id", activeThreadId)
-    .order("created_at", { ascending: true });
-
-  if (!error) setMessages((data ?? []) as any);
-}
-
+      if (activeThreadId) {
+        await loadThreadMessages(activeThreadId, me.id, false);
+      }
     } finally {
       setBusy(null);
     }
@@ -364,17 +434,17 @@ if (activeThreadId) {
       if (error) throw error;
 
       setReply("");
-      // optimistic append (realtime may also deliver; guard against dup)
+      setReplyDraftByThread((prev) => ({ ...prev, [activeThreadId]: "" }));
+
       setMessages((prev) => {
         const next = [...prev, ins as any as MessageRow];
         const dedup = Array.from(new Map(next.map((m) => [m.id, m])).values());
         return dedup.sort((a, b) => a.created_at.localeCompare(b.created_at));
       });
 
-      // mark read so my own send doesn’t create unread for me
-      await markThreadRead(activeThreadId, me.id);
+      setTimeout(() => scrollToBottom("force"), 0);
 
-      // refresh inbox summary so latest preview updates immediately
+      await markThreadRead(activeThreadId, me.id);
       await reloadSummaries(me.id);
     } catch (e: any) {
       setErr(e?.message ?? "Failed to send message.");
@@ -386,9 +456,13 @@ if (activeThreadId) {
   async function openNewMessage() {
     if (!me) return;
 
-    // Coach-only UI gate (server/RLS still enforces)
     if (!(me.role === "coach" || me.role === "assistant_coach")) {
       setErr("Only coaches can create new threads.");
+      return;
+    }
+
+    if (isMobile) {
+      router.push("/app/messages/compose");
       return;
     }
 
@@ -397,7 +471,6 @@ if (activeThreadId) {
     setNewSubject("");
     setNewFirstMsg("");
 
-    // Load athlete list (was previously working; keep simple)
     const { data, error } = await supabase
       .from("profiles")
       .select("user_id, full_name, role")
@@ -429,7 +502,6 @@ if (activeThreadId) {
     setErr(null);
 
     try {
-      // 1) Create thread
       const { data: t, error: tErr } = await supabase
         .from("message_threads")
         .insert({
@@ -442,14 +514,12 @@ if (activeThreadId) {
 
       if (tErr) throw tErr;
 
-      // 2) Add participants (coach adds both)
       const { error: pErr } = await supabase.from("message_thread_participants").insert([
         { thread_id: t.id, user_id: me.id, added_by: me.id },
         { thread_id: t.id, user_id: athleteId, added_by: me.id },
       ]);
       if (pErr) throw pErr;
 
-      // 3) Optional first message (coach)
       const first = newFirstMsg.trim();
       if (first) {
         const { error: mErr } = await supabase.from("messages").insert({
@@ -462,10 +532,9 @@ if (activeThreadId) {
 
       setShowNew(false);
 
-      // refresh + open thread
       await reloadSummaries(me.id);
       setActiveThreadId(t.id);
-      await loadThreadMessages(t.id, me.id);
+      await loadThreadMessages(t.id, me.id, true);
     } catch (e: any) {
       setErr(e?.message ?? "Failed to create thread.");
     } finally {
@@ -473,23 +542,14 @@ if (activeThreadId) {
     }
   }
 
-  // -----------------------------
-  // Derived view helpers
-  // -----------------------------
-  const threadParticipants = (tid: string) =>
-    participants.filter((p) => p.thread_id === tid).map((p) => p.user_id);
-
   const participantNames = (tid: string) => {
-    const ids = threadParticipants(tid);
+    const ids = participants.filter((p) => p.thread_id === tid).map((p) => p.user_id);
     const names = ids
       .map((id) => profilesById[id]?.full_name || (id === me?.id ? me?.name : null) || "Unknown")
       .filter(Boolean);
     return names.join(", ");
   };
 
-  // -----------------------------
-  // Render
-  // -----------------------------
   if (loading) {
     return (
       <div className="mx-auto max-w-6xl px-4 py-10">
@@ -501,16 +561,26 @@ if (activeThreadId) {
   const canCreate = me?.role === "coach" || me?.role === "assistant_coach";
 
   const activeThread = activeThreadId ? threads.find((t) => t.id === activeThreadId) : null;
-  const activeHeader = activeThread ? (activeThread.subject || "Thread") : "Select a thread";
+  const activeHeader = activeThread ? activeThread.subject || "Thread" : "Select a thread";
+
+  const showInboxPane = !isMobile || !activeThreadId;
+  const showThreadPane = !isMobile || !!activeThreadId;
+
+  const threadBoxHeightClass = isMobile ? "h-[70vh]" : "h-[360px]";
+
+  const headerStickyClass = isMobile
+    ? "sticky top-0 z-10 -mx-4 px-4 pt-4 pb-3 bg-[#0b1220]/80 backdrop-blur-md border-b border-white/10"
+    : "";
+  const replyStickyWrapClass = isMobile
+    ? "sticky bottom-0 z-10 -mx-4 px-4 pt-3 pb-4 bg-[#0b1220]/80 backdrop-blur-md border-t border-white/10"
+    : "";
 
   return (
     <div className="mx-auto max-w-6xl px-4 py-8">
       <div className="flex items-start justify-between gap-4">
         <div>
           <h1 className="text-2xl font-semibold">Messages</h1>
-          <p className="mt-1 text-sm text-white/70">
-            Athletes can reply within threads they are added to by coaching staff.
-          </p>
+          <p className="mt-1 text-sm text-white/70">Athletes can reply within threads they are added to by coaching staff.</p>
           {err && <p className="mt-2 text-sm text-red-200">{err}</p>}
         </div>
 
@@ -540,189 +610,253 @@ if (activeThreadId) {
         </div>
       </div>
 
-      <div className="mt-6 grid grid-cols-1 gap-4 lg:grid-cols-[320px_1fr]">
+      <div className={isMobile ? "mt-6" : "mt-6 grid grid-cols-1 gap-4 lg:grid-cols-[320px_1fr]"}>
         {/* Inbox */}
-        <section className="glass rounded-3xl p-4">
-          <div className="text-sm font-semibold text-white/80">Inbox</div>
-          <div className="mt-3 space-y-2">
-            {threads.length === 0 && <div className="text-sm text-white/60">No threads yet.</div>}
+        {showInboxPane && (
+          <section className="glass rounded-3xl p-4">
+            <div className="text-sm font-semibold text-white/80">Inbox</div>
+            <div className="mt-3 space-y-2">
+              {threads.length === 0 && <div className="text-sm text-white/60">No threads yet.</div>}
 
-            {threads.map((t) => {
-              const isActive = t.id === activeThreadId;
-              const latest = latestByThread[t.id] ?? null;
-              const unread = unreadByThread[t.id] ?? 0;
-		const isUnread = unread > 0;
+              {threads.map((t) => {
+                const isActive = t.id === activeThreadId;
+                const latest = latestByThread[t.id] ?? null;
 
+                const unread = unreadByThread[t.id] ?? 0;
+                const isUnread = unread > 0;
 
-              return (
-                <button
-                  key={t.id}
-                  onClick={() => onSelectThread(t.id)}
-                  className={[
-                    "w-full rounded-2xl border px-3 py-3 text-left transition",
-                    isActive
-                      ? "border-white/25 bg-white/10"
-                      : "border-white/10 bg-black/20 hover:border-white/20 hover:bg-white/5",
-                  ].join(" ")}
-                >
-                  <div className="flex items-center justify-between gap-2">
-                   <div className={["truncate", isUnread ? "font-extrabold text-white" : "font-semibold text-white"].join(" ")}>
-  {t.subject || "Thread"}
-</div>
+                return (
+                  <button
+                    key={t.id}
+                    onClick={() => onSelectThread(t.id)}
+                    className={[
+                      "w-full rounded-2xl border px-3 py-3 text-left transition",
+                      isActive
+                        ? "border-white/25 bg-white/10"
+                        : "border-white/10 bg-black/20 hover:border-white/20 hover:bg-white/5",
+                    ].join(" ")}
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="min-w-0 truncate">
+                        <span className={isUnread ? "font-extrabold text-white" : "font-semibold text-white"}>
+                          {t.subject || "Thread"}
+                        </span>
 
-                    <div className="shrink-0 text-xs text-white/55">
-                      {latest ? fmtTime(latest.created_at) : fmtTime(t.created_at)}
+                        {isUnread ? (
+                          <>
+                            <span
+                              className="ml-2 inline-block h-2 w-2 rounded-full bg-white align-middle sm:hidden"
+                              aria-label="Unread"
+                            />
+                            <span className="ml-2 hidden items-center rounded-full bg-white/15 px-2 py-0.5 text-xs font-semibold text-white sm:inline-flex">
+                              New {unread}
+                            </span>
+                          </>
+                        ) : null}
+                      </div>
+
+                      <div className="shrink-0 text-xs text-white/55">
+                        {latest ? fmtTime(latest.created_at) : fmtTime(t.created_at)}
+                      </div>
                     </div>
-                  </div>
 
-                  <div className="mt-1 line-clamp-1 text-sm text-white/70">
-                    {latest ? latest.body : "—"}
-                  </div>
-                </button>
-              );
-            })}
-          </div>
-        </section>
+                    <div className="mt-1 line-clamp-1 text-sm text-white/70">{latest ? latest.body : "—"}</div>
+                  </button>
+                );
+              })}
+            </div>
+          </section>
+        )}
 
         {/* Thread */}
-        <section className="glass rounded-3xl p-4 lg:p-6">
-          <div className="flex items-start justify-between gap-3">
-            <div>
-              <h2 className="text-lg font-semibold">{activeHeader}</h2>
-              {activeThreadId && (
-                <div className="mt-1 text-sm text-white/60">
-                  Participants: {participantNames(activeThreadId)}
+        {showThreadPane && (
+          <section className="glass rounded-3xl p-4 lg:p-6">
+            {/* Sticky header on mobile */}
+            <div className={headerStickyClass}>
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <h2 className="text-lg font-semibold">{activeHeader}</h2>
+                  {activeThreadId && (
+                    <div className="mt-1 text-sm text-white/60">Participants: {participantNames(activeThreadId)}</div>
+                  )}
+                </div>
+
+                <div className="flex items-center gap-2">
+                  {isMobile && activeThreadId && (
+                    <button
+                      onClick={onMobileBackToInbox}
+                      className="rounded-2xl border border-white/10 bg-white/5 px-4 py-2 text-sm font-semibold text-white hover:bg-white/10"
+                    >
+                      Back
+                    </button>
+                  )}
+                  {activeThread && <div className="text-xs text-white/55">{fmtTime(activeThread.created_at)}</div>}
+                </div>
+              </div>
+            </div>
+
+            <div
+              ref={threadScrollRef}
+              onScroll={updateAutoScrollFlag}
+              className={[
+                "mt-4 overflow-auto rounded-2xl border border-white/10 bg-black/20 p-3",
+                threadBoxHeightClass,
+              ].join(" ")}
+            >
+              {!activeThreadId ? (
+                <div className="text-sm text-white/60">Select a thread from the inbox.</div>
+              ) : (
+                <div className="space-y-3">
+                  {messages.map((m) => {
+                    const mine = m.sender_user_id === me?.id;
+                    const senderName =
+                      profilesById[m.sender_user_id]?.full_name || (mine ? me?.name : null) || "Unknown";
+
+                    return (
+                      <div key={m.id} className={mine ? "flex justify-end" : "flex justify-start"}>
+                        <div
+                          className={[
+                            "max-w-[78%] rounded-2xl border px-3 py-2",
+                            mine ? "border-white/10 bg-white/10" : "border-white/10 bg-black/30",
+                          ].join(" ")}
+                        >
+                          <div className="text-xs text-white/60">
+                            {senderName} · {fmtTime(m.created_at)}
+                          </div>
+                          <div className="mt-1 whitespace-pre-wrap text-sm text-white">{m.body}</div>
+                        </div>
+                      </div>
+                    );
+                  })}
+
+                  <div ref={bottomRef} />
                 </div>
               )}
             </div>
-            {activeThread && (
-              <div className="text-xs text-white/55">{fmtTime(activeThread.created_at)}</div>
-            )}
-          </div>
 
-          <div className="mt-4 h-[360px] overflow-auto rounded-2xl border border-white/10 bg-black/20 p-3">
-            {!activeThreadId ? (
-              <div className="text-sm text-white/60">Select a thread from the inbox.</div>
-            ) : (
-              <div className="space-y-3">
-                {messages.map((m) => {
-                  const mine = m.sender_user_id === me?.id;
-                  const senderName =
-                    profilesById[m.sender_user_id]?.full_name ||
-                    (mine ? me?.name : null) ||
-                    "Unknown";
-
-                  return (
-                    <div key={m.id} className={mine ? "flex justify-end" : "flex justify-start"}>
-                      <div
-                        className={[
-                          "max-w-[78%] rounded-2xl border px-3 py-2",
-                          mine
-                            ? "border-white/10 bg-white/10"
-                            : "border-white/10 bg-black/30",
-                        ].join(" ")}
-                      >
-                        <div className="text-xs text-white/60">
-                          {senderName} · {fmtTime(m.created_at)}
-                        </div>
-                        <div className="mt-1 whitespace-pre-wrap text-sm text-white">{m.body}</div>
-                      </div>
-                    </div>
-                  );
-                })}
+            {/* Reply */}
+            <div className={replyStickyWrapClass}>
+              <div className="flex items-end gap-2">
+                <textarea
+                  value={reply}
+                  onChange={(e) => {
+                    const v = e.target.value;
+                    setReply(v);
+                    if (activeThreadId) setReplyDraftByThread((prev) => ({ ...prev, [activeThreadId]: v }));
+                  }}
+                  onFocus={() => setTimeout(() => scrollToBottom("auto"), 0)}
+                  disabled={!activeThreadId || busy === "send"}
+                  placeholder={activeThreadId ? "Type a reply…" : "Select a thread to reply…"}
+                  className="h-12 flex-1 resize-none rounded-2xl border border-white/10 bg-black/20 px-4 py-3 text-sm text-white outline-none focus:border-white/20"
+                />
+                <button
+                  onClick={onSendReply}
+                  disabled={!activeThreadId || busy === "send" || reply.trim().length === 0}
+                  className={[
+                    "rounded-2xl px-4 py-3 text-sm font-semibold transition",
+                    activeThreadId && reply.trim().length > 0 && busy !== "send"
+                      ? "bg-white text-black hover:bg-white/90"
+                      : "bg-white/10 text-white/50",
+                  ].join(" ")}
+                >
+                  {busy === "send" ? "Sending…" : "Send"}
+                </button>
               </div>
-            )}
-          </div>
 
-          {/* Reply */}
-          <div className="mt-4 flex items-end gap-2">
-            <textarea
-              value={reply}
-              onChange={(e) => setReply(e.target.value)}
-              disabled={!activeThreadId || busy === "send"}
-              placeholder={activeThreadId ? "Type a reply…" : "Select a thread to reply…"}
-              className="h-12 flex-1 resize-none rounded-2xl border border-white/10 bg-black/20 px-4 py-3 text-sm text-white outline-none focus:border-white/20"
-            />
-            <button
-              onClick={onSendReply}
-              disabled={!activeThreadId || busy === "send" || reply.trim().length === 0}
-              className={[
-                "rounded-2xl px-4 py-3 text-sm font-semibold transition",
-                activeThreadId && reply.trim().length > 0 && busy !== "send"
-                  ? "bg-white text-black hover:bg-white/90"
-                  : "bg-white/10 text-white/50",
-              ].join(" ")}
-            >
-              {busy === "send" ? "Sending…" : "Send"}
-            </button>
-          </div>
-
-          <div className="mt-2 text-xs text-white/50">
-            Note: Editing/deleting messages is disabled by policy.
-          </div>
-        </section>
-      </div>
-
-      {/* New Message Modal */}
-      {showNew && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 px-4">
-          <div className="glass w-full max-w-2xl rounded-3xl p-6">
-            <div className="flex items-start justify-between gap-3">
-              <div>
-                <h3 className="text-xl font-semibold">New message</h3>
-                <p className="mt-1 text-sm text-white/70">
-                  Coach-only thread creation. Select an athlete to start a direct thread.
-                </p>
-              </div>
-              <button
-                onClick={() => setShowNew(false)}
-                className="rounded-2xl border border-white/10 bg-white/5 px-4 py-2 text-sm font-semibold hover:bg-white/10"
-              >
-                Close
-              </button>
+              {/* NOTE: show here only on mobile to avoid duplication */}
+              {isMobile && (
+                <div className="mt-2 text-xs text-white/50">Note: Editing/deleting messages is disabled by policy.</div>
+              )}
             </div>
 
-            <div className="mt-5 space-y-4">
-              <div>
-                <div className="text-xs font-semibold text-white/60">Athlete</div>
-                <select
-                  value={newAthleteId}
-                  onChange={(e) => setNewAthleteId(e.target.value)}
-                  className="mt-2 w-full rounded-2xl border border-white/10 bg-black/20 px-4 py-3 text-white outline-none focus:border-white/20"
-                >
-                  <option value="">Select an athlete…</option>
-                  {athletes.map((a) => (
-                    <option key={a.user_id} value={a.user_id}>
-                      {a.full_name || a.user_id}
-                    </option>
-                  ))}
-                </select>
-              </div>
+            {/* Desktop note (single instance) */}
+            {!isMobile && (
+              <div className="mt-2 text-xs text-white/50">Note: Editing/deleting messages is disabled by policy.</div>
+            )}
+          </section>
+        )}
+      </div>
 
-              <div>
-                <div className="text-xs font-semibold text-white/60">Subject</div>
-                <input
-                  value={newSubject}
-                  onChange={(e) => setNewSubject(e.target.value)}
-                  placeholder="e.g., Practice attendance"
-                  className="mt-2 w-full rounded-2xl border border-white/10 bg-black/20 px-4 py-3 text-white outline-none focus:border-white/20"
-                />
-              </div>
+      {/* New Message Modal (desktop only) */}
+      {showNew && (
+        <div className="fixed inset-0 z-[9999]">
+          <div
+            className="absolute inset-0 bg-black/80 backdrop-blur-sm"
+            onClick={() => setShowNew(false)}
+            aria-hidden="true"
+          />
 
-              <div>
-                <div className="text-xs font-semibold text-white/60">Initial message (optional)</div>
-                <textarea
-                  value={newFirstMsg}
-                  onChange={(e) => setNewFirstMsg(e.target.value)}
-                  placeholder="Type your first message…"
-                  className="mt-2 h-28 w-full resize-none rounded-2xl border border-white/10 bg-black/20 px-4 py-3 text-white outline-none focus:border-white/20"
-                />
-              </div>
+          <div className="absolute inset-0 flex items-center justify-center p-4">
+            <div
+              className={[
+                "w-full max-w-2xl",
+                "rounded-3xl border border-white/10",
+                "bg-[#0b1220]/95 shadow-2xl",
+                "overflow-hidden",
+              ].join(" ")}
+              role="dialog"
+              aria-modal="true"
+              aria-label="New message"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div className="flex items-start justify-between gap-4 border-b border-white/10 px-6 py-5">
+                <div>
+                  <h3 className="text-xl font-semibold text-white">New message</h3>
+                  <p className="mt-1 text-sm text-white/70">
+                    Coach-only thread creation. Select an athlete to start a direct thread.
+                  </p>
+                </div>
 
-              <div className="mt-2 flex justify-end gap-2">
                 <button
                   onClick={() => setShowNew(false)}
-                  className="rounded-2xl border border-white/10 bg-white/5 px-4 py-2 text-sm font-semibold hover:bg-white/10"
+                  className="rounded-2xl border border-white/10 bg-white/5 px-4 py-2 text-sm font-semibold text-white hover:bg-white/10"
+                >
+                  Close
+                </button>
+              </div>
+
+              <div className="space-y-4 px-6 py-6">
+                <div>
+                  <div className="text-xs font-semibold text-white/60">Athlete</div>
+                  <select
+                    value={newAthleteId}
+                    onChange={(e) => setNewAthleteId(e.target.value)}
+                    className="mt-2 w-full rounded-2xl border border-white/10 bg-black/30 px-4 py-3 text-white outline-none focus:border-white/20"
+                  >
+                    <option value="">Select an athlete…</option>
+                    {athletes.map((a) => (
+                      <option key={a.user_id} value={a.user_id}>
+                        {a.full_name || a.user_id}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <div>
+                  <div className="text-xs font-semibold text-white/60">Subject</div>
+                  <input
+                    value={newSubject}
+                    onChange={(e) => setNewSubject(e.target.value)}
+                    placeholder="e.g., Practice attendance"
+                    className="mt-2 w-full rounded-2xl border border-white/10 bg-black/30 px-4 py-3 text-white outline-none focus:border-white/20"
+                  />
+                </div>
+
+                <div>
+                  <div className="text-xs font-semibold text-white/60">Initial message (optional)</div>
+                  <textarea
+                    value={newFirstMsg}
+                    onChange={(e) => setNewFirstMsg(e.target.value)}
+                    placeholder="Type your first message…"
+                    className="mt-2 h-28 w-full resize-none rounded-2xl border border-white/10 bg-black/30 px-4 py-3 text-white outline-none focus:border-white/20"
+                  />
+                </div>
+              </div>
+
+              <div className="flex items-center justify-end gap-2 border-t border-white/10 px-6 py-4">
+                <button
+                  onClick={() => setShowNew(false)}
+                  className="rounded-2xl border border-white/10 bg-white/5 px-4 py-2 text-sm font-semibold text-white hover:bg-white/10"
                 >
                   Cancel
                 </button>
