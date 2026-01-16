@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { supabaseBrowser } from "@/lib/supabase/client";
 
 type Role = "athlete" | "coach" | "assistant_coach";
@@ -26,6 +26,13 @@ type EditDraft = {
 
 function isValidEmail(email: string) {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
+}
+
+function formatWho(name?: string | null, email?: string | null) {
+  const n = (name ?? "").trim();
+  const e = (email ?? "").trim();
+  if (n && e) return `${n} (${e})`;
+  return n || e || "selected user";
 }
 
 export default function AccountsClient() {
@@ -59,6 +66,13 @@ export default function AccountsClient() {
 
   // Access gate
   const [canAdmin, setCanAdmin] = useState(false);
+
+  // Role filter tabs
+  const [roleFilter, setRoleFilter] = useState<"all" | "coaches" | "athletes">("all");
+
+  // Delete confirmation modal (typed DELETE for coaching staff)
+  const [deleteTarget, setDeleteTarget] = useState<AccountRow | null>(null);
+  const [deleteConfirmText, setDeleteConfirmText] = useState("");
 
   const inputCls =
     "w-full min-w-0 rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-white placeholder:text-white/35 outline-none focus:border-white/20";
@@ -97,6 +111,8 @@ export default function AccountsClient() {
       const res = await fetch("/api/admin/accounts/list", { method: "GET" });
       const json = await res.json();
       if (!res.ok) throw new Error(json?.error ?? "Failed to load accounts.");
+
+      // IMPORTANT: your backend returns { accounts: [...] }
       setRows((json?.accounts ?? []) as AccountRow[]);
     } catch (e: any) {
       setError(e?.message ?? "Failed to load accounts.");
@@ -144,7 +160,7 @@ export default function AccountsClient() {
       const json = await res.json();
       if (!res.ok) throw new Error(json?.error ?? "Failed to create account.");
 
-      setToast(`Created ${newRole} account for ${fn}.`);
+      setToast(`Created ${newRole} account for ${formatWho(fn, em)}.`);
       setFullName("");
       setEmail("");
       setPhone("");
@@ -234,7 +250,7 @@ export default function AccountsClient() {
         setRows((prev) => prev.map((x) => (x.user_id === r.user_id ? (json.account as AccountRow) : x)));
       }
 
-      setToast("Account updated.");
+      setToast(`Updated account for ${formatWho(fn, em)}.`);
       setEditingId(null);
       setDraft(null);
     } catch (e: any) {
@@ -245,29 +261,49 @@ export default function AccountsClient() {
     }
   }
 
-  // Delete: MUST confirm before deleting
-  async function deleteAccount(r: AccountRow) {
-    if (!canAdmin) return;
+  /* ---------------------------
+     Delete (typed DELETE for coaches)
+  ----------------------------*/
 
-    const label = r.full_name ?? r.email ?? "this user";
-    const ok = window.confirm(`Delete account for ${label}?\n\nThis will permanently remove the user.`);
-    if (!ok) return;
+  function openDelete(r: AccountRow) {
+    if (!canAdmin) return;
+    setError(null);
+    setToast(null);
+    setDeleteTarget(r);
+    setDeleteConfirmText("");
+  }
+
+  function closeDelete() {
+    setDeleteTarget(null);
+    setDeleteConfirmText("");
+  }
+
+  async function confirmDelete() {
+    if (!canAdmin) return;
+    if (!deleteTarget) return;
+
+    const isStaff = deleteTarget.role === "coach" || deleteTarget.role === "assistant_coach";
+    if (isStaff && deleteConfirmText.trim() !== "DELETE") {
+      setError("To delete a coaching staff account, type DELETE to confirm.");
+      return;
+    }
 
     setError(null);
     setToast(null);
-    setBusyId(r.user_id);
+    setBusyId(deleteTarget.user_id);
 
     try {
       const res = await fetch("/api/admin/accounts/delete", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ user_id: r.user_id }),
+        body: JSON.stringify({ user_id: deleteTarget.user_id }),
       });
 
       const json = await res.json();
       if (!res.ok) throw new Error(json?.error ?? "Failed to delete account.");
 
-      setToast("Account deleted.");
+      setToast(`Deleted account for ${formatWho(deleteTarget.full_name, deleteTarget.email)}.`);
+      closeDelete();
       await refresh();
     } catch (e: any) {
       setError(e?.message ?? "Failed to delete account.");
@@ -276,7 +312,10 @@ export default function AccountsClient() {
     }
   }
 
-  // Reset password: coach-assisted copy/paste reset link workflow
+  /* ---------------------------
+     Password reset
+  ----------------------------*/
+
   async function requestPasswordReset(r: AccountRow) {
     if (!canAdmin) return;
 
@@ -305,6 +344,8 @@ export default function AccountsClient() {
       setResetLink(link);
       setResetTargetEmail(em);
       setResetTargetName((r.full_name ?? "").trim() || em);
+
+      setToast(`Password reset link generated for ${formatWho(r.full_name, em)}.`);
     } catch (e: any) {
       setError(e?.message ?? "Failed to generate reset link.");
     } finally {
@@ -321,7 +362,7 @@ export default function AccountsClient() {
   async function copyToClipboard(text: string) {
     try {
       await navigator.clipboard.writeText(text);
-      setToast("Copied.");
+      setToast(`Copied reset link for ${formatWho(resetTargetName, resetTargetEmail)}.`);
     } catch {
       setToast("Copy failed. Please copy manually.");
     }
@@ -335,6 +376,25 @@ export default function AccountsClient() {
           `Hi${resetTargetName ? ` ${resetTargetName}` : ""},\n\nHere is your password reset link for the Track Team Portal:\n\n${resetLink}\n\nOpen the link and set a new password.\n\n— Coach`
         )}`
       : null;
+
+  /* ---------------------------
+     Filters
+  ----------------------------*/
+
+  const counts = useMemo(() => {
+    const coaches = rows.filter((r) => r.role === "coach" || r.role === "assistant_coach").length;
+    const athletes = rows.filter((r) => r.role === "athlete").length;
+    return { all: rows.length, coaches, athletes };
+  }, [rows]);
+
+  const filteredRows = useMemo(() => {
+    if (roleFilter === "coaches") return rows.filter((r) => r.role === "coach" || r.role === "assistant_coach");
+    if (roleFilter === "athletes") return rows.filter((r) => r.role === "athlete");
+    return rows;
+  }, [rows, roleFilter]);
+
+  const filterTitle =
+    roleFilter === "all" ? "All accounts" : roleFilter === "coaches" ? "Coaching staff" : "Athletes";
 
   return (
     <div className="max-w-6xl mx-auto px-6 py-10">
@@ -374,6 +434,12 @@ export default function AccountsClient() {
               <div className="text-base font-semibold text-white">
                 Password reset link for {resetTargetName ?? "account"}
               </div>
+
+              {/* NEW: Email under name */}
+              {resetTargetEmail ? (
+                <div className="mt-1 text-sm text-white/70">{resetTargetEmail}</div>
+              ) : null}
+
               <div className="mt-1 text-sm text-white/70">
                 Copy the link and send it from your email client. The app will not send emails.
               </div>
@@ -510,11 +576,37 @@ export default function AccountsClient() {
 
       {/* Accounts table */}
       <div className="mt-6 rounded-3xl border border-white/10 bg-white/5 p-8">
-        <div className="flex items-start justify-between gap-4">
+        <div className="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
           <div>
-            <div className="text-lg font-semibold text-white">All accounts</div>
+            <div className="text-lg font-semibold text-white">{filterTitle}</div>
+
+            {/* NEW: Role filter tabs */}
+            <div className="mt-3 flex flex-wrap gap-2">
+              <button
+                type="button"
+                className={roleFilter === "all" ? `${pillBtn} bg-white text-black hover:bg-white` : pillBtn}
+                onClick={() => setRoleFilter("all")}
+              >
+                All ({counts.all})
+              </button>
+              <button
+                type="button"
+                className={roleFilter === "coaches" ? `${pillBtn} bg-white text-black hover:bg-white` : pillBtn}
+                onClick={() => setRoleFilter("coaches")}
+              >
+                Coaches ({counts.coaches})
+              </button>
+              <button
+                type="button"
+                className={roleFilter === "athletes" ? `${pillBtn} bg-white text-black hover:bg-white` : pillBtn}
+                onClick={() => setRoleFilter("athletes")}
+              >
+                Athletes ({counts.athletes})
+              </button>
+            </div>
           </div>
-          <div className="text-sm text-white/70">{rows.length} records</div>
+
+          <div className="text-sm text-white/70">{filteredRows.length} records</div>
         </div>
 
         <div className="mt-6 overflow-x-auto">
@@ -530,14 +622,14 @@ export default function AccountsClient() {
             </thead>
 
             <tbody className="text-sm text-white/90">
-              {rows.length === 0 ? (
+              {filteredRows.length === 0 ? (
                 <tr>
                   <td colSpan={5} className="py-6 text-white/60">
                     {loading ? "Loading…" : "No accounts found."}
                   </td>
                 </tr>
               ) : (
-                rows.map((r) => {
+                filteredRows.map((r) => {
                   const isEditing = editingId === r.user_id;
                   const rowBusy = busyId === r.user_id;
 
@@ -567,7 +659,9 @@ export default function AccountsClient() {
                           </>
                         )}
 
-                        {rowError[r.user_id] ? <div className="mt-2 text-xs text-red-200">{rowError[r.user_id]}</div> : null}
+                        {rowError[r.user_id] ? (
+                          <div className="mt-2 text-xs text-red-200">{rowError[r.user_id]}</div>
+                        ) : null}
                       </td>
 
                       <td className="py-4 pr-3">
@@ -619,7 +713,9 @@ export default function AccountsClient() {
                             <option value="female">Female</option>
                           </select>
                         ) : (
-                          <span className="text-white/80">{r.gender ? (r.gender === "male" ? "Male" : "Female") : "—"}</span>
+                          <span className="text-white/80">
+                            {r.gender ? (r.gender === "male" ? "Male" : "Female") : "—"}
+                          </span>
                         )}
                       </td>
 
@@ -636,7 +732,12 @@ export default function AccountsClient() {
                             </>
                           ) : (
                             <>
-                              <button type="button" className={pillBtn} disabled={!canAdmin || rowBusy} onClick={() => beginEdit(r)}>
+                              <button
+                                type="button"
+                                className={pillBtn}
+                                disabled={!canAdmin || rowBusy}
+                                onClick={() => beginEdit(r)}
+                              >
                                 Edit
                               </button>
 
@@ -649,7 +750,12 @@ export default function AccountsClient() {
                                 Reset password
                               </button>
 
-                              <button type="button" className={pillBtn} disabled={!canAdmin || rowBusy} onClick={() => deleteAccount(r)}>
+                              <button
+                                type="button"
+                                className={pillBtn}
+                                disabled={!canAdmin || rowBusy}
+                                onClick={() => openDelete(r)}
+                              >
                                 Delete
                               </button>
                             </>
@@ -664,6 +770,59 @@ export default function AccountsClient() {
           </table>
         </div>
       </div>
+
+      {/* NEW: Delete confirmation modal */}
+      {deleteTarget ? (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 px-6">
+          <div className="w-full max-w-lg rounded-3xl border border-white/10 bg-[#0b1220] p-6">
+            <div className="text-lg font-semibold text-white">Confirm delete</div>
+
+            <div className="mt-2 text-sm text-white/70">
+              You are deleting: <span className="text-white">{formatWho(deleteTarget.full_name, deleteTarget.email)}</span>
+            </div>
+
+            {deleteTarget.role === "coach" || deleteTarget.role === "assistant_coach" ? (
+              <>
+                <div className="mt-4 rounded-2xl border border-red-500/20 bg-red-500/10 px-4 py-3 text-sm text-red-200">
+                  Deleting a coaching staff account will immediately revoke admin access. This cannot be undone.
+                </div>
+
+                <div className="mt-4">
+                  <div className={labelCls}>Type DELETE to confirm</div>
+                  <input
+                    value={deleteConfirmText}
+                    onChange={(e) => setDeleteConfirmText(e.target.value)}
+                    placeholder="DELETE"
+                    className={`mt-2 ${inputCls}`}
+                    disabled={busyId === deleteTarget.user_id}
+                  />
+                </div>
+              </>
+            ) : (
+              <div className="mt-4 text-sm text-white/80">Delete this athlete account? This cannot be undone.</div>
+            )}
+
+            <div className="mt-6 flex flex-wrap justify-end gap-3">
+              <button type="button" className={pillBtn} onClick={closeDelete} disabled={busyId === deleteTarget.user_id}>
+                Cancel
+              </button>
+
+              <button
+                type="button"
+                className={`${pillBtn} border-red-500/30 bg-red-500/15 text-red-100 hover:bg-red-500/20`}
+                onClick={confirmDelete}
+                disabled={
+                  busyId === deleteTarget.user_id ||
+                  ((deleteTarget.role === "coach" || deleteTarget.role === "assistant_coach") &&
+                    deleteConfirmText.trim() !== "DELETE")
+                }
+              >
+                {busyId === deleteTarget.user_id ? "Deleting…" : "Delete"}
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }
